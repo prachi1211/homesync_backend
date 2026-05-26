@@ -1,0 +1,298 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  password_hash String?
+  name          String
+  avatar_url    String?
+  google_id     String?  @unique
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  memberships           HouseholdMember[]
+  refresh_tokens        RefreshToken[]
+  password_reset_tokens PasswordResetToken[]
+  grocery_items         GroceryItem[]
+  chores_created        Chore[]              @relation("ChoreCreator")
+  chore_assignments     Chore[]              @relation("ChoreAssignee")
+  chore_participants    ChoreParticipant[]
+  chore_completions     ChoreCompletionLog[]
+  expenses_paid         Expense[]            @relation("ExpensePayer")
+  expenses_created      Expense[]            @relation("ExpenseCreator")
+  expense_splits        ExpenseSplit[]
+  settlements_from      Settlement[]         @relation("SettlementFrom")
+  settlements_to        Settlement[]         @relation("SettlementTo")
+  settlements_created   Settlement[]         @relation("SettlementCreator")
+  households_created    Household[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  token_hash String    @unique
+  user_id    String
+  expires_at DateTime
+  revoked_at DateTime?
+  created_at DateTime  @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id         String    @id @default(uuid())
+  token_hash String    @unique
+  user_id    String
+  expires_at DateTime
+  used_at    DateTime?
+  created_at DateTime  @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("password_reset_tokens")
+}
+
+// ── Household ─────────────────────────────────────────────────────────────────
+
+model Household {
+  id          String    @id @default(uuid())
+  name        String
+  invite_code String    @unique
+  created_by  String
+  archived_at DateTime?
+  created_at  DateTime  @default(now())
+  updated_at  DateTime  @updatedAt
+
+  creator     User              @relation(fields: [created_by], references: [id])
+  members     HouseholdMember[]
+  groceries   GroceryItem[]
+  chores      Chore[]
+  expenses    Expense[]
+  settlements Settlement[]
+
+  @@index([invite_code])
+  @@map("households")
+}
+
+model HouseholdMember {
+  id           String   @id @default(uuid())
+  household_id String
+  user_id      String
+  role         Role     @default(MEMBER)
+  joined_at    DateTime @default(now())
+
+  household Household @relation(fields: [household_id], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([household_id, user_id])
+  @@index([user_id])
+  @@map("household_members")
+}
+
+enum Role {
+  OWNER
+  MEMBER
+}
+
+// ── Grocery ───────────────────────────────────────────────────────────────────
+
+model GroceryItem {
+  id           String    @id @default(uuid())
+  household_id String
+  added_by     String
+  name         String
+  quantity     Int       @default(1)
+  category     String    @default("Other")
+  priority     Priority?
+  is_bought    Boolean   @default(false)
+  bought_at    DateTime?
+  starred      Boolean   @default(false)
+  notes        String    @default("")
+  created_at   DateTime  @default(now())
+  updated_at   DateTime  @updatedAt
+
+  household     Household            @relation(fields: [household_id], references: [id], onDelete: Cascade)
+  added_by_user User                 @relation(fields: [added_by], references: [id])
+  purchase_logs GroceryPurchaseLog[]
+
+  @@index([household_id])
+  @@map("grocery_items")
+}
+
+model GroceryPurchaseLog {
+  id           String   @id @default(uuid())
+  item_id      String
+  household_id String
+  item_name    String
+  purchased_by String
+  purchased_at DateTime @default(now())
+
+  item GroceryItem @relation(fields: [item_id], references: [id], onDelete: Cascade)
+
+  @@index([household_id])
+  @@map("grocery_purchase_logs")
+}
+
+enum Priority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+// ── Chore ─────────────────────────────────────────────────────────────────────
+
+model Chore {
+  id                  String         @id @default(uuid())
+  household_id        String
+  name                String
+  assignment_type     AssignmentType
+  frequency           ChoreFrequency
+  current_assignee_id String?
+  created_by          String
+  deadline            DateTime?
+  end_date            DateTime?
+  created_at          DateTime       @default(now())
+  updated_at          DateTime       @updatedAt
+
+  household        Household            @relation(fields: [household_id], references: [id], onDelete: Cascade)
+  creator          User                 @relation("ChoreCreator", fields: [created_by], references: [id])
+  current_assignee User?                @relation("ChoreAssignee", fields: [current_assignee_id], references: [id])
+  participants     ChoreParticipant[]
+  completion_logs  ChoreCompletionLog[]
+
+  @@index([household_id])
+  @@map("chores")
+}
+
+model ChoreParticipant {
+  chore_id       String
+  user_id        String
+  queue_position Int
+
+  chore Chore @relation(fields: [chore_id], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([chore_id, user_id])
+  @@index([chore_id])
+  @@map("chore_participants")
+}
+
+model ChoreCompletionLog {
+  id           String   @id @default(uuid())
+  chore_id     String
+  household_id String
+  completed_by String
+  completed_at DateTime @default(now())
+
+  chore     Chore @relation(fields: [chore_id], references: [id], onDelete: Cascade)
+  completer User  @relation(fields: [completed_by], references: [id])
+
+  @@index([chore_id])
+  @@index([household_id])
+  @@map("chore_completion_logs")
+}
+
+enum AssignmentType {
+  FIXED
+  ROTATING
+  PERSONAL
+}
+
+enum ChoreFrequency {
+  DAILY
+  EVERY2DAYS
+  EVERY3DAYS
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+}
+
+// ── Expense ───────────────────────────────────────────────────────────────────
+
+model Expense {
+  id           String          @id @default(uuid())
+  household_id String
+  description  String
+  amount       Decimal         @db.Decimal(10, 2)
+  category     ExpenseCategory
+  date         DateTime
+  paid_by      String
+  split_type   SplitType
+  notes        String          @default("")
+  created_by   String
+  created_at   DateTime        @default(now())
+  updated_at   DateTime        @updatedAt
+
+  household Household     @relation(fields: [household_id], references: [id], onDelete: Cascade)
+  payer     User          @relation("ExpensePayer", fields: [paid_by], references: [id])
+  creator   User          @relation("ExpenseCreator", fields: [created_by], references: [id])
+  splits    ExpenseSplit[]
+
+  @@index([household_id, date])
+  @@map("expenses")
+}
+
+model ExpenseSplit {
+  id         String  @id @default(uuid())
+  expense_id String
+  user_id    String
+  amount     Decimal @db.Decimal(10, 2)
+  percentage Decimal @db.Decimal(5, 2)
+
+  expense Expense @relation(fields: [expense_id], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [user_id], references: [id])
+
+  @@unique([expense_id, user_id])
+  @@map("expense_splits")
+}
+
+model Settlement {
+  id           String   @id @default(uuid())
+  household_id String
+  from_user_id String
+  to_user_id   String
+  amount       Decimal  @db.Decimal(10, 2)
+  note         String   @default("")
+  created_by   String
+  created_at   DateTime @default(now())
+
+  household Household @relation(fields: [household_id], references: [id], onDelete: Cascade)
+  from_user User      @relation("SettlementFrom", fields: [from_user_id], references: [id])
+  to_user   User      @relation("SettlementTo", fields: [to_user_id], references: [id])
+  creator   User      @relation("SettlementCreator", fields: [created_by], references: [id])
+
+  @@index([household_id])
+  @@map("settlements")
+}
+
+enum SplitType {
+  EQUAL
+  PERCENTAGE
+  EXACT
+}
+
+enum ExpenseCategory {
+  GROCERIES
+  UTILITIES
+  RENT
+  DINING
+  TRANSPORT
+  ENTERTAINMENT
+  HEALTHCARE
+  HOUSEHOLD
+  OTHER
+}
