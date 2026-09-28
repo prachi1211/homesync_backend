@@ -25,12 +25,10 @@ export function generateSecureToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
-export async function hashToken(token: string): Promise<string> {
-  return bcrypt.hash(token, env.BCRYPT_ROUNDS);
-}
-
-export async function compareToken(token: string, hash: string): Promise<boolean> {
-  return bcrypt.compare(token, hash);
+// Refresh/reset tokens are high-entropy random values, so a fast deterministic
+// hash is sufficient and lets us look them up directly by token_hash.
+export function hashToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
 }
 
 export async function hashPassword(password: string): Promise<string> {

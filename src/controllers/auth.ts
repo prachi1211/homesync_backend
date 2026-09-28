@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import { z } from "zod";
+import jwt from "jsonwebtoken";
 import { prisma } from "../config/database";
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../utils/jwt";
 import {
@@ -7,7 +8,6 @@ import {
   comparePassword,
   generateSecureToken,
   hashToken,
-  compareToken,
 } from "../utils/crypto";
 import { sendPasswordResetEmail } from "../utils/email";
 import { success, AppError } from "../utils/response";
@@ -20,9 +20,10 @@ function makeTokenPair(user: { id: string; email: string; name: string }) {
 }
 
 async function storeRefreshToken(userId: string, rawToken: string) {
-  const tokenHash = await hashToken(rawToken);
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  await prisma.refreshToken.create({ data: { user_id: userId, token_hash: tokenHash, expires_at: expiresAt } });
+  const { exp } = jwt.decode(rawToken) as { exp: number };
+  await prisma.refreshToken.create({
+    data: { user_id: userId, token_hash: hashToken(rawToken), expires_at: new Date(exp * 1000) },
+  });
 }
 
 function serializeUser(user: { id: string; email: string; name: string; avatar_url: string | null; google_id: string | null; created_at: Date }) {
@@ -103,30 +104,23 @@ export async function refreshTokens(req: Request, res: Response, next: NextFunct
     // Verify JWT signature and expiry
     const payload = verifyRefreshToken(rawToken);
 
-    // Find matching token record by checking all non-revoked tokens for this user
-    const storedTokens = await prisma.refreshToken.findMany({
-      where: { user_id: payload.sub, revoked_at: null, expires_at: { gt: new Date() } },
-    });
+    // Revoke the presented token atomically — count 0 means unknown, expired or already used
+    const [revoked, user] = await Promise.all([
+      prisma.refreshToken.updateMany({
+        where: {
+          token_hash: hashToken(rawToken),
+          user_id: payload.sub,
+          revoked_at: null,
+          expires_at: { gt: new Date() },
+        },
+        data: { revoked_at: new Date() },
+      }),
+      prisma.user.findUnique({ where: { id: payload.sub } }),
+    ]);
 
-    let matchedToken: (typeof storedTokens)[0] | undefined;
-    for (const stored of storedTokens) {
-      if (await compareToken(rawToken, stored.token_hash)) {
-        matchedToken = stored;
-        break;
-      }
-    }
-
-    if (!matchedToken) {
+    if (revoked.count === 0) {
       throw new AppError("INVALID_REFRESH_TOKEN", "Invalid or expired refresh token", 401);
     }
-
-    // Revoke old token
-    await prisma.refreshToken.update({
-      where: { id: matchedToken.id },
-      data: { revoked_at: new Date() },
-    });
-
-    const user = await prisma.user.findUnique({ where: { id: payload.sub } });
     if (!user) throw new AppError("INVALID_REFRESH_TOKEN", "User not found", 401);
 
     const { access_token, refresh_token: newRefresh } = makeTokenPair(user);
@@ -147,19 +141,10 @@ export async function logout(req: Request, res: Response, next: NextFunction) {
     const { refresh_token: rawToken } = req.body as z.infer<typeof logoutSchema>;
 
     // Best-effort revoke — don't error if not found
-    const storedTokens = await prisma.refreshToken.findMany({
-      where: { user_id: req.user!.id, revoked_at: null },
+    await prisma.refreshToken.updateMany({
+      where: { token_hash: hashToken(rawToken), user_id: req.user!.id, revoked_at: null },
+      data: { revoked_at: new Date() },
     });
-
-    for (const stored of storedTokens) {
-      if (await compareToken(rawToken, stored.token_hash)) {
-        await prisma.refreshToken.update({
-          where: { id: stored.id },
-          data: { revoked_at: new Date() },
-        });
-        break;
-      }
-    }
 
     success(res, { message: "Logged out successfully" });
   } catch (err) {
@@ -179,7 +164,7 @@ export async function forgotPassword(req: Request, res: Response, next: NextFunc
     const user = await prisma.user.findUnique({ where: { email } });
     if (user) {
       const rawToken = generateSecureToken();
-      const tokenHash = await hashToken(rawToken);
+      const tokenHash = hashToken(rawToken);
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
       await prisma.passwordResetToken.create({
         data: { user_id: user.id, token_hash: tokenHash, expires_at: expiresAt },
@@ -208,18 +193,9 @@ export async function resetPassword(req: Request, res: Response, next: NextFunct
     const { token: rawToken, password } = req.body as z.infer<typeof resetPasswordSchema>;
     const invalid = new AppError("INVALID_RESET_TOKEN", "Invalid or expired reset link", 400);
 
-    // Find unexpired, unused reset tokens — check all since we can't query by raw token
-    const candidates = await prisma.passwordResetToken.findMany({
-      where: { used_at: null, expires_at: { gt: new Date() } },
+    const matched = await prisma.passwordResetToken.findFirst({
+      where: { token_hash: hashToken(rawToken), used_at: null, expires_at: { gt: new Date() } },
     });
-
-    let matched: (typeof candidates)[0] | undefined;
-    for (const c of candidates) {
-      if (await compareToken(rawToken, c.token_hash)) {
-        matched = c;
-        break;
-      }
-    }
 
     if (!matched) throw invalid;
 
